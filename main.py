@@ -2,17 +2,10 @@
 Ollama Local Model Version - Train/Test CSV Format
 Cost: $0.00 | Uses: train.csv, test.csv | Outputs: results.csv, training_evaluation_ollama.csv
 All prompts and logic identical to Gemini version - ONLY API calls changed
+PATHWAY REQUIRED - No fallbacks
 """
 
-try:
-    import pathway as pw
-    PATHWAY_AVAILABLE = True
-except (ImportError, AttributeError):
-    PATHWAY_AVAILABLE = False
-    import numpy as np
-    from sentence_transformers import SentenceTransformer
-    from sklearn.metrics.pairwise import cosine_similarity
-
+import pathway as pw
 import ollama
 import json
 import os
@@ -280,121 +273,104 @@ Output ONLY this JSON (no markdown):
 
 
 # =============================================================================
-# FALLBACK VECTOR STORE FOR WINDOWS
+# PATHWAY VECTOR STORE - REQUIRED FOR COMPETITION
 # =============================================================================
 
-class SimpleVectorStore:
-    """Lightweight vector store for semantic search"""
-    
-    def __init__(self, novel_path: str):
-        print(f"  Loading novel: {novel_path}")
-        self.model = SentenceTransformer('all-MiniLM-L6-v2')
-        self.chunks = self._read_and_chunk_file(novel_path)
-        if self.chunks:
-            print(f"  Created {len(self.chunks)} chunks")
-            print(f"  Encoding chunks...")
-            self.embeddings = self.model.encode(self.chunks, show_progress_bar=False)
-        else:
-            self.embeddings = np.array([])
-    
-    def _read_and_chunk_file(self, path: str, chunk_size: int = 500) -> List[str]:
-        """Read file and split into overlapping chunks"""
-        try:
-            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                text = f.read()
-            
-            chunks = []
-            overlap = 100
-            for i in range(0, len(text), chunk_size - overlap):
-                chunk = text[i:i + chunk_size]
-                if chunk.strip():
-                    chunks.append(chunk)
-            return chunks
-        except Exception as e:
-            print(f"  Error reading file {path}: {e}")
-            return []
-
-    def query(self, query: str, k: int = 5) -> List[Dict]:
-        """Find top k most relevant chunks"""
-        if len(self.chunks) == 0:
-            return []
-            
-        query_vec = self.model.encode([query])
-        similarities = cosine_similarity(query_vec, self.embeddings)[0]
-        
-        top_k = min(k, len(self.chunks))
-        top_indices = np.argsort(similarities)[-top_k:][::-1]
-        
-        results = []
-        for idx in top_indices:
-            results.append({
-                'text': self.chunks[idx],
-                'chunk': self.chunks[idx],
-                'score': float(similarities[idx])
-            })
-        return results
-
-
 def build_vector_store_for_novel(novel_filename: str):
-    """Build vector store (uses Pathway on Linux, fallback on Windows)"""
+    """
+    Build vector store using Pathway framework (REQUIRED for Track A)
+    No fallbacks - Pathway must be properly installed
+    """
     if not os.path.exists(novel_filename):
         raise FileNotFoundError(f"Novel not found: {novel_filename}")
     
-    print(f"  Building vector store for: {novel_filename}")
+    print(f"  Building Pathway vector store for: {novel_filename}")
     
-    if PATHWAY_AVAILABLE:
-        # Pathway implementation (same as Gemini version)
-        data_source = pw.io.fs.read(
-            novel_filename,
-            format="binary",
-            mode="static",
-            with_metadata=True
-        )
-        documents = data_source.select(
-            text=pw.this.data,
-            path=pw.this.metadata["path"]
-        )
-        embedder = pw.xpacks.llm.embedders.SentenceTransformerEmbedder(
-            model="all-MiniLM-L6-v2"
-        )
-        vector_store = pw.xpacks.llm.VectorStore(
-            documents,
-            embedder=embedder,
-            parser=pw.xpacks.llm.parsers.OpenParse()
-        )
-        return vector_store
-    else:
-        print("  → Using Windows-compatible fallback")
-        return SimpleVectorStore(novel_filename)
+    # Read the novel using Pathway
+    data_source = pw.io.fs.read(
+        novel_filename,
+        format="binary",
+        mode="static",
+        with_metadata=True
+    )
+    
+    # Select text and metadata
+    documents = data_source.select(
+        text=pw.this.data,
+        path=pw.this.metadata["path"]
+    )
+    
+    # Create embedder
+    embedder = pw.xpacks.llm.embedders.SentenceTransformerEmbedder(
+        model="all-MiniLM-L6-v2"
+    )
+    
+    # Build vector store
+    vector_store = pw.xpacks.llm.VectorStore(
+        documents,
+        embedder=embedder,
+        parser=pw.xpacks.llm.parsers.OpenParse()
+    )
+    
+    print(f"  ✓ Pathway vector store built successfully")
+    return vector_store
 
 
 def multi_pass_retrieval(vector_store, claim: str, k_per_pass: int = 5) -> List[Dict]:
-    """Enhanced retrieval: query variations + reranking (SAME AS GEMINI VERSION)"""
+    """
+    Enhanced retrieval: query variations + reranking
+    Works with Pathway VectorStore
+    """
     all_chunks = []
     
     # Pass 1: Direct query
-    chunks_1 = vector_store.query(query=claim, k=k_per_pass)
-    all_chunks.extend(chunks_1)
+    try:
+        chunks_1 = vector_store.query(query=claim, k=k_per_pass)
+        all_chunks.extend(chunks_1)
+    except Exception as e:
+        print(f"    ⚠ Retrieval pass 1 error: {e}")
     
     # Pass 2: Negation query (find contradictory evidence)
-    negation_query = f"evidence that contradicts: {claim}"
-    chunks_2 = vector_store.query(query=negation_query, k=k_per_pass)
-    all_chunks.extend(chunks_2)
+    try:
+        negation_query = f"evidence that contradicts: {claim}"
+        chunks_2 = vector_store.query(query=negation_query, k=k_per_pass)
+        all_chunks.extend(chunks_2)
+    except Exception as e:
+        print(f"    ⚠ Retrieval pass 2 error: {e}")
     
     # Pass 3: Context expansion (related events)
-    context_query = f"events related to: {claim}"
-    chunks_3 = vector_store.query(query=context_query, k=k_per_pass)
-    all_chunks.extend(chunks_3)
+    try:
+        context_query = f"events related to: {claim}"
+        chunks_3 = vector_store.query(query=context_query, k=k_per_pass)
+        all_chunks.extend(chunks_3)
+    except Exception as e:
+        print(f"    ⚠ Retrieval pass 3 error: {e}")
+    
+    if not all_chunks:
+        print(f"    ⚠ No chunks retrieved for: {claim[:60]}...")
+        return []
     
     # Deduplicate chunks
     seen_texts = set()
     unique_chunks = []
     for chunk in all_chunks:
-        text = chunk.get('text', chunk.get('chunk', ''))[:100]
-        if text not in seen_texts:
-            seen_texts.add(text)
-            unique_chunks.append(chunk)
+        # Handle different chunk formats from Pathway
+        text = ""
+        if isinstance(chunk, dict):
+            text = chunk.get('text', chunk.get('chunk', chunk.get('data', '')))
+        else:
+            text = str(chunk)
+        
+        text_key = text[:100]
+        if text_key not in seen_texts and text.strip():
+            seen_texts.add(text_key)
+            # Normalize chunk format
+            unique_chunks.append({
+                'text': text,
+                'chunk': text
+            })
     
+    print(f"    → Retrieved {len(unique_chunks)} unique chunks")
     return unique_chunks[:15]
 
 
@@ -405,7 +381,7 @@ def multi_pass_retrieval(vector_store, claim: str, k_per_pass: int = 5) -> List[
 def process_single_backstory(
     backstory: str,
     book_name: str,
-    vector_stores: Dict[str, SimpleVectorStore],
+    vector_stores: Dict,
     character_name: str = ""
 ) -> Tuple[int, str]:
     """Process one backstory - IDENTICAL LOGIC TO GEMINI VERSION"""
@@ -478,7 +454,7 @@ def process_single_backstory(
     return prediction, rationale
 
 
-def evaluate_on_training_data(vector_stores: Dict[str, SimpleVectorStore]) -> float:
+def evaluate_on_training_data(vector_stores: Dict) -> float:
     """Evaluate on training data - OUTPUTS training_evaluation_ollama.csv"""
     
     if not os.path.exists(TRAIN_CSV):
@@ -517,7 +493,7 @@ def evaluate_on_training_data(vector_stores: Dict[str, SimpleVectorStore]) -> fl
         
         status = "✓" if is_correct else "✗"
         print(f"{status} Predicted={prediction}, Actual={actual} | {rationale[:60]}...")
-        print(f"   Ollama API calls: {API_CALLS}")
+        print(f"   Ollama API calls so far: {API_CALLS}")
         
         results.append({
             'id': story_id,
@@ -555,7 +531,7 @@ def evaluate_on_training_data(vector_stores: Dict[str, SimpleVectorStore]) -> fl
     return accuracy
 
 
-def generate_test_predictions(vector_stores: Dict[str, SimpleVectorStore]):
+def generate_test_predictions(vector_stores: Dict):
     """Generate test predictions - OUTPUTS results.csv"""
     
     if not os.path.exists(TEST_CSV):
@@ -582,7 +558,7 @@ def generate_test_predictions(vector_stores: Dict[str, SimpleVectorStore]):
             backstory, book_name, vector_stores, character
         )
         
-        print(f"   Ollama requests: {API_CALLS}")
+        print(f"   Ollama requests so far: {API_CALLS}")
         
         results.append({
             'id': story_id,
@@ -627,31 +603,57 @@ def check_ollama_setup():
         return False
 
 
+def check_pathway_setup():
+    """Verify Pathway is properly installed"""
+    print("\nChecking Pathway setup...")
+    try:
+        # Test basic Pathway functionality
+        test_data = pw.debug.table_from_markdown("col1\ntest")
+        print(f"✓ Pathway is working correctly")
+        return True
+    except Exception as e:
+        print(f"❌ Pathway error: {e}")
+        print(f"\nSetup instructions:")
+        print(f"  1. Install Pathway: pip install pathway")
+        print(f"  2. Install LLM xpack: pip install pathway[xpack-llm]")
+        print(f"  3. Verify: python -c 'import pathway as pw; print(pw.__version__)'")
+        return False
+
+
 def main():
     """Main entry point"""
     
     print("="*70)
-    print("HACKATHON 2026 - Ollama Version (Train/Test Format)")
+    print("HACKATHON 2026 - Ollama + Pathway (Track A Compliant)")
     print(f"Model: {OLLAMA_MODEL} | Cost: $0.00")
     print("="*70)
+    
+    # Check Pathway (REQUIRED)
+    if not check_pathway_setup():
+        print("\n❌ CRITICAL: Pathway is required for Track A")
+        print("This code cannot run without Pathway.")
+        return
     
     # Check Ollama
     if not check_ollama_setup():
         return
     
-    # Build vector stores
-    print("\n[STEP 1] Building vector stores...")
+    # Build vector stores using Pathway
+    print("\n[STEP 1] Building Pathway vector stores...")
     vector_stores = {}
     
     for book_name, filename in BOOK_MAPPING.items():
         if os.path.exists(filename):
             print(f"\n📚 Building for: {book_name}")
-            vector_stores[book_name] = build_vector_store_for_novel(filename)
+            try:
+                vector_stores[book_name] = build_vector_store_for_novel(filename)
+            except Exception as e:
+                print(f"❌ Error building vector store for {book_name}: {e}")
         else:
             print(f"\n⚠ Novel not found: {filename}")
     
     if not vector_stores:
-        print("\n❌ No novels found!")
+        print("\n❌ No vector stores built! Check that novel files exist.")
         return
     
     # Evaluate on training data
@@ -660,9 +662,15 @@ def main():
         accuracy = evaluate_on_training_data(vector_stores)
         
         if accuracy < 0.60:
-            print("\n⚠ Low accuracy. Consider larger model: ollama pull llama3.1:70b")
+            print("\n⚠ Low accuracy. Consider:")
+            print("  1. Using larger model: ollama pull llama3.1:70b")
+            print("  2. Tuning retrieval parameters")
+            print("  3. Adjusting consistency thresholds")
         elif accuracy > 0.65:
-            print("\n✓ Good accuracy! Proceeding to test.")
+            print("\n✓ Good accuracy! Proceeding to test predictions.")
+    else:
+        print(f"⚠ Training file not found: {TRAIN_CSV}")
+        print("Skipping training evaluation...")
     
     # Generate test predictions
     print("\n[STEP 3] Generating test predictions...")
@@ -671,6 +679,10 @@ def main():
     print("\n✓ COMPLETED!")
     print(f"Total cost: $0.00")
     print(f"Total Ollama requests: {API_CALLS}")
+    print("\n📦 Submission files ready:")
+    print(f"  - {OUTPUT_CSV}")
+    print(f"  - training_evaluation_ollama.csv (optional)")
+    print(f"  - results_detailed_ollama.csv (optional)")
 
 
 if __name__ == "__main__":
